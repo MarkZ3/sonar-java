@@ -120,7 +120,7 @@ public class UnclosedResourcesCheck extends SECheck implements JavaFileScanner {
       if (isOpeningResource(syntaxNode)) {
         final SymbolicValue instanceValue = programState.peekValue();
         if (!(instanceValue instanceof ResourceWrapperSymbolicValue)) {
-          programState = programState.addConstraint(instanceValue, new ObjectConstraint(syntaxNode, States.OPENED));
+          programState = programState.addConstraint(instanceValue, new ObjectConstraint(false, false, syntaxNode, States.OPENED));
         }
       }
     }

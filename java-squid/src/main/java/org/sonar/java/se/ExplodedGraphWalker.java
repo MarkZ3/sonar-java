@@ -19,7 +19,6 @@
  */
 package org.sonar.java.se;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableSet;
@@ -28,6 +27,7 @@ import com.google.common.collect.Lists;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.sonar.java.cfg.CFG;
+import org.sonar.java.cfg.LiveVariables;
 import org.sonar.java.model.JavaTree;
 import org.sonar.java.se.checks.ConditionAlwaysTrueOrFalseCheck;
 import org.sonar.java.se.checks.LocksNotUnlockedCheck;
@@ -62,6 +62,7 @@ import org.sonar.plugins.java.api.tree.WhileStatementTree;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
@@ -84,10 +85,11 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
   ExplodedGraph.Node node;
   ExplodedGraph.ProgramPoint programPosition;
   ProgramState programState;
+  private LiveVariables liveVariables;
+  private HashSet<Symbol> addedCurrentBlock = new HashSet<>();
 
   private CheckerDispatcher checkerDispatcher;
 
-  @VisibleForTesting
   int steps;
   ConstraintManager constraintManager;
 
@@ -121,6 +123,7 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
   private void execute(MethodTree tree) {
     checkerDispatcher.init();
     CFG cfg = CFG.build(tree);
+    liveVariables = LiveVariables.analyze(cfg);
     explodedGraph = new ExplodedGraph();
     methodTree = tree;
     constraintManager = new ConstraintManager();
@@ -200,9 +203,20 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
     return startingStates;
   }
 
+  private void removeDeadSymbols(CFG.Block block) {
+    Set<Symbol> liveVariablesOut = liveVariables.getOut(block);
+    for (Symbol symbol : addedCurrentBlock) {
+      if (!liveVariablesOut.contains(symbol)) {
+        programState = programState.remove(symbol);
+      }
+    }
+    addedCurrentBlock.clear();
+  }
+
   private void handleBlockExit(ExplodedGraph.ProgramPoint programPosition) {
     CFG.Block block = programPosition.block;
     Tree terminator = block.terminator();
+    removeDeadSymbols(block);
     if (terminator != null) {
       switch (terminator.kind()) {
         case IF_STATEMENT:
@@ -391,12 +405,12 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
         sv = SymbolicValue.NULL_LITERAL;
       }
       if (sv != null) {
-        programState = programState.put(variableTree.symbol(), sv);
+        programState = programStatePut(programState, variableTree.symbol(), sv);
       }
     } else {
       ProgramState.Pop unstack = programState.unstackValue(1);
       programState = unstack.state;
-      programState = programState.put(variableTree.symbol(), unstack.values.get(0));
+      programState = programStatePut(programState, variableTree.symbol(), unstack.values.get(0));
     }
   }
 
@@ -417,7 +431,7 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
       ProgramState.Pop unstack = programState.unstackValue(2);
       SymbolicValue value = unstack.values.get(1);
       programState = unstack.state;
-      programState = programState.put(((IdentifierTree) variable).symbol(), value);
+      programState = programStatePut(programState, ((IdentifierTree) variable).symbol(), value);
       programState = programState.stackValue(value);
     }
   }
@@ -461,7 +475,7 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
     unarySymbolicValue.computedFrom(unstackUnary.values);
     if(tree.is(Tree.Kind.POSTFIX_DECREMENT, Tree.Kind.POSTFIX_INCREMENT, Tree.Kind.PREFIX_DECREMENT, Tree.Kind.PREFIX_DECREMENT)
         && ((UnaryExpressionTree) tree).expression().is(Tree.Kind.IDENTIFIER)) {
-      programState = programState.put(((IdentifierTree) ((UnaryExpressionTree) tree).expression()).symbol(), unarySymbolicValue);
+      programState = programStatePut(programState, ((IdentifierTree) ((UnaryExpressionTree) tree).expression()).symbol(), unarySymbolicValue);
     }
     if(tree.is(Tree.Kind.POSTFIX_DECREMENT, Tree.Kind.POSTFIX_INCREMENT)) {
       programState = programState.stackValue(unstackUnary.values.get(0));
@@ -475,7 +489,7 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
     SymbolicValue value = programState.getValue(symbol);
     if (value == null) {
       value = constraintManager.createSymbolicValue(tree);
-      programState = programState.put(symbol, value);
+      programState = programStatePut(programState, symbol, value);
     }
     programState = programState.stackValue(value);
   }
@@ -519,6 +533,17 @@ public class ExplodedGraphWalker extends BaseTreeVisitor {
 
   private void resetFieldValues() {
     programState = programState.resetFieldValues(constraintManager);
+  }
+
+  private static boolean isLocalVariable(Symbol symbol) {
+    return symbol.owner().isMethodSymbol();
+  }
+
+  private ProgramState programStatePut(ProgramState programState, Symbol symbol, SymbolicValue value) {
+    if (isLocalVariable(symbol)) {
+      addedCurrentBlock.add(symbol);
+    }
+    return programState.put(symbol, value);
   }
 
   private void logState(MethodInvocationTree mit) {
