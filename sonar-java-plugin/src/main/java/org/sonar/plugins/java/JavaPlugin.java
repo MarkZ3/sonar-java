@@ -88,7 +88,8 @@ public class JavaPlugin extends SonarPlugin {
         SonarComponents.class,
         DefaultJavaResourceLocator.class,
         JavaSquidSensor.class,
-        SuppressWarningsFilter.class);
+        SuppressWarningsFilter.class,
+        JavaXmlSensor.class);
     return builder.build();
   }
 
